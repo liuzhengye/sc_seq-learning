@@ -1,0 +1,182 @@
+#scRAN-seq courselearning    Hemberg LAB 教程
+
+#installing
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("SingleCellExperiment")
+BiocManager::install("scater")
+BiocManager::install("Matrix")
+
+
+
+
+#Tabula muris 从头开始
+
+#读入数据 (Smartseq2)
+dat = read.delim("E:/scseq/FACS/Kidney-counts.csv", sep=",", header=TRUE)#读入逗号分隔的count matrix，存储为数据框:
+dat[1:5,1:5]
+
+#第一列基因名字，移除作为列名字
+dim(dat)
+rownames(dat) <- dat[,1]
+dat <- dat[,-1]
+
+#这是Smartseq2数据集，可能含有spike-ins:
+rownames(dat)[grep("^ERCC-", rownames(dat))]
+#？搜出来后即不作处理么？
+
+#从列名字中提取metadata信息: #metadata指示分组信息 #即列名A14.MAA000545.3_8_M.1.1
+cellIDs <- colnames(dat)
+cell_info <- strsplit(cellIDs, "\\.")#以.为分隔
+Well <- lapply(cell_info, function(x){x[1]})
+Well <- unlist(Well)
+Plate <- unlist(lapply(cell_info, function(x){x[2]}))
+Mouse <- unlist(lapply(cell_info, function(x){x[3]})) #提取第一二三个分别为well，plate， mouse
+
+#检测每种metadata类型的数据分布：#此处列出mouse，还可以看其他
+summary(factor(Mouse))
+#查看有没有技术因子是cofounded，实验批次与供体小鼠批次一致:
+table(Mouse, Plate)
+
+#最后读入计算预测的细胞类型注释，并与表达矩阵中的细胞注释做比较:
+ann <- read.table("E:/scseq/FACS/annotations_FACS.csv", sep=",", header=TRUE)
+ann <- ann[match(cellIDs, ann[,1]),]#仅保留match的
+celltype <- ann[,3]
+table(celltype) #查看不同细胞类型
+
+###
+#构建scater对象 #scater是一个包
+#为了构建SingleCellExperiment对象，先把所有的细胞注释放到一个数据框中。因为实验批次(pcr plate)和供体小鼠完全重合，所以只保留一个信息。
+suppressMessages(require("SingleCellExperiment")) #最好不用require
+suppressMessages(require("scater"))
+cell_anns <- data.frame(mouse = Mouse, well=Well, type=celltype)
+rownames(cell_anns) <- colnames(dat)
+sceset <- SingleCellExperiment(assays = list(counts = as.matrix(dat)), colData=cell_anns)
+str(sceset)
+
+#如果数据集包含spike-ins，我们在SingleCellExperiment对象中定义一个变量记录它们。
+isSpike(sceset, "ERCC") <- grepl("ERCC-", rownames(sceset))
+str(sceset)
+
+#读入10X的数据
+#下面使用Matrix包读入稀疏矩阵： # 打开.mtx文件会看到两行标题行后面是包含总行数 (基因数)、列数 (样本数)和稀疏矩阵总行数
+library(Matrix)
+cellbarcodes <- read.table("E:/scseq/droplet/Kidney-10X_P4_5/barcodes.tsv")
+genenames <- read.table("E:/scseq/droplet/Kidney-10X_P4_5/genes.tsv")
+molecules <- Matrix::readMM("E:/scseq/droplet/Kidney-10X_P4_5/matrix.mtx")
+
+#下一步增加合适的行或列的名字。首先查看read的cellbarcode信息会发现这个文件只有barcode序列。考虑到10X数据每一批的cellbarcode是有重叠的，所以在合并数据前，需要把批次信息与barcode信息合并一起。
+head(cellbarcodes)
+rownames(molecules) <- genenames[,1]
+colnames(molecules) <- paste("10X_P4_5", cellbarcodes[,1], sep="_")
+
+
+#读入计算注释的细胞类型信息:
+meta <- read.delim("E:/scseq/droplet/metadata_droplet.csv", sep=",", header=TRUE)
+head(meta)
+
+#我们需要用10X_P4_5获得这批数据对应的metadata信息。这时需要注意metadata表格中mouse ID与前面plate-based (FACS SmartSeq2)数据集的mouse ID不同，这里用-而非_作为分隔符，并且性别在中间。通过查阅文献中的描述得知droplet (10X)和plate-based (FACS SmartSeq2)的技术用了同样的8只老鼠。所以对数据做下修正，使得10X与FACS的数据一致。
+meta[meta$channel == "10X_P4_5",]
+mouseID <- "3_8_M"
+#??此处不是很能理解、
+
+ann <- read.delim("E:/scseq/droplet/annotations_droplets.csv", sep=",", header=TRUE)
+head(ann)
+#！！！注释中的cellID和cellbarcodes也存在细微差别，少了最后的-1，在匹配前需要做下校正。(生信宝典注：这种数据不一致是经常要处理的问题，每一步检查结果。如果与预期不符，考虑有没有未考虑到的数据不一致的地方。)
+ann[,1] <- paste(ann[,1], "-1", sep="")
+ann_subset <- ann[match(colnames(molecules), ann[,1]),]
+celltype <- ann_subset[,3]
+
+###
+#构建cell-metadata数据框: #类似annotation数据框
+cell_anns <- data.frame(mouse = rep(mouseID, times=ncol(molecules)), type=celltype)
+rownames(cell_anns) <- colnames(molecules)
+head(cell_anns)
+
+#读入多个组织数据
+molecules1 <- molecules
+cell_anns1 <- cell_anns
+
+cellbarcodes <- read.table("E:/scseq/droplet/Kidney-10X_P4_6/barcodes.tsv")
+genenames <- read.table("E:/scseq/droplet/Kidney-10X_P4_6/genes.tsv")
+molecules <- Matrix::readMM("E:/scseq/droplet/Kidney-10X_P4_6/matrix.mtx")
+rownames(molecules) <- genenames[,1]
+colnames(molecules) <- paste("10X_P4_6", cellbarcodes[,1], sep="_")
+mouseID <- "3_9_M"
+ann_subset <- ann[match(colnames(molecules), ann[,1]),]
+celltype <- ann_subset[,3]
+cell_anns <- data.frame(mouse = rep(mouseID, times=ncol(molecules)), type=celltype)
+rownames(cell_anns) <- colnames(molecules)
+
+molecules2 <- molecules
+cell_anns2 <- cell_anns
+
+cellbarcodes <- read.table("E:/scseq/droplet/Kidney-10X_P7_5/barcodes.tsv")
+genenames <- read.table("E:/scseq/droplet/Kidney-10X_P7_5/genes.tsv")
+molecules <- Matrix::readMM("E:/scseq/droplet/Kidney-10X_P7_5/matrix.mtx")
+rownames(molecules) <- genenames[,1]
+colnames(molecules) <- paste("10X_P7_5", cellbarcodes[,1], sep="_")
+mouseID <- "3_57_F"
+ann_subset <- ann[match(colnames(molecules), ann[,1]),]
+celltype <- ann_subset[,3]
+cell_anns <- data.frame(mouse = rep(mouseID, times=ncol(molecules)), type=celltype)
+rownames(cell_anns) <- colnames(molecules)
+
+molecules3 <- molecules
+cell_anns3 <- cell_anns
+
+
+#创建scater对象
+#现在读入了多个批次的10X数据，把它们组合成一个SingleCellExperiment object对象。首先检查不同批次数据的基因名字是否一致:
+identical(rownames(molecules1), rownames(molecules2))
+identical(rownames(molecules1), rownames(molecules3))
+
+#确认没有重复的细胞ID:
+sum(colnames(molecules1) %in% colnames(molecules2))
+sum(colnames(molecules1) %in% colnames(molecules3))
+sum(colnames(molecules2) %in% colnames(molecules3))
+
+#检查无误，把它们组合起来:
+# 获得大的表达矩阵
+all_molecules <- cbind(molecules1, molecules2, molecules3)
+# 获得大的数据矩阵
+all_cell_anns <- as.data.frame(rbind(cell_anns1, cell_anns2, cell_anns3))
+# 增加批次信息 #rep(c("a","b"), times=Na,Nb),a重复完了才重复b
+all_cell_anns$batch <- rep(c("10X_P4_5", "10X_P4_6","10X_P7_5"), times = c(nrow(cell_anns1), nrow(cell_anns2), nrow(cell_anns3)))
+
+#现在创建SingleCellExperiment对象。SingleCellExperiment对象的优势是可以正常矩阵、稀疏矩阵格式存储数据，还可以以HDF5格式在磁盘存储和访问大的非稀疏矩阵而不用全部加载到内存中。
+library("SingleCellExperiment")
+library("scater")
+all_molecules <- as.matrix(all_molecules)
+sceset <- SingleCellExperiment(assays = list(counts = all_molecules), colData=all_cell_anns)
+
+#这是10X的数据，不包含spike-ins直接存储数据:
+saveRDS(sceset, "kidney_droplet.rds")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
